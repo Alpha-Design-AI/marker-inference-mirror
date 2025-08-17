@@ -20,7 +20,7 @@ import threading
 import click
 import psutil
 import requests
-from docker_manager import DockerContainerManager
+import docker
 
 
 from docker_manager import DockerContainerManager
@@ -418,6 +418,7 @@ class PerformanceTester:
         max_files: int | None = None,
         force_ocr: bool = False,
         out_dir: str = "",
+        copies: int = 1,
     ):
         self.pdf_dir = Path(pdf_dir)
         self.base_url = base_url
@@ -427,14 +428,14 @@ class PerformanceTester:
         self.max_files = max_files
         self.config = {"force_ocr": force_ocr, "paginate_output": True}
         self.out_dir = out_dir
+        self.copies = copies
 
     def find_pdf_files(self) -> List[Path]:
         """Find all PDF files in the directory."""
         pdf_files = list(self.pdf_dir.glob("*.pdf"))
-        pdf_files.extend(self.pdf_dir.glob("**/*.pdf"))
         if self.max_files is not None:
             pdf_files = pdf_files[: self.max_files]
-        return sorted(pdf_files)
+        return sorted(pdf_files * self.copies)
 
     async def _download_images(self, session: aiohttp.ClientSession, image_urls: List[str], pdf_name: str):
         """Download images and save them to the output directory."""
@@ -629,8 +630,12 @@ class PerformanceTester:
             print(
                 f"Throughput (pages/sec): {total_pages / total_wall_time if total_wall_time > 0 else 0:.2f}"
             )
+            worker_throughput = (total_worker_pages / total_worker_time)
             print(
-                f"Worker calculated throughput (pages/sec): {(total_worker_pages / total_worker_time) * gpu_worker_count if total_worker_time > 0 else 0:.2f}"
+                f"Worker Throughput (pages/sec): {worker_throughput:.2f}"
+            )
+            print(
+                f"Worker calculated throughput (pages/sec): {worker_throughput * gpu_worker_count:.2f}"
             )
             print(f"Total worker time (sec): {total_worker_time:.2f}")
             print(f"Total worker pages: {total_worker_pages}")
@@ -751,6 +756,12 @@ class PerformanceTester:
     is_flag=True,
     help="Run in CPU mode (no GPU access, useful for debugging)",
 )
+@click.option(
+    "--copies",
+    type=int,
+    default=1,
+    help="Number of copies of each document to run",
+)
 def main(
     pdf_dir: str,
     port: int,
@@ -762,6 +773,7 @@ def main(
     gpu_idx: int,
     image_name: str,
     cpu_mode: bool = False,
+    copies: int = 1,
 ):
     # Verify PDF directory exists
     if not os.path.isdir(pdf_dir):
@@ -803,6 +815,7 @@ def main(
             max_files,
             force_ocr,
             out_dir,
+            copies,
         )
         start_time = time.time()
         tester.run_tests()
