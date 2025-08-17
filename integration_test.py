@@ -22,9 +22,6 @@ import psutil
 import requests
 import docker
 
-
-from docker_manager import DockerContainerManager
-
 try:
     import pynvml
 
@@ -169,6 +166,7 @@ class ResourceMonitor:
                     self.gpu_handle
                 )
                 self.gpu_available = True
+                print(f"✓ GPU monitoring initialized for GPU {gpu_idx}")
             except Exception as e:
                 print(f"Warning: Could not initialize GPU monitoring: {e}")
 
