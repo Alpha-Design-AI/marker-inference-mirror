@@ -20,6 +20,8 @@ import threading
 import click
 import psutil
 import requests
+from docker_manager import DockerContainerManager
+
 
 from docker_manager import DockerContainerManager
 
@@ -29,6 +31,121 @@ try:
     NVIDIA_ML_AVAILABLE = True
 except ImportError:
     NVIDIA_ML_AVAILABLE = False
+
+
+class DockerContainerManager:
+    """Manages Docker container lifecycle using Docker Python API."""
+
+    def __init__(
+        self,
+        image_name: str = "datalab-inference-combined",
+        container_name: str = "test-inference",
+    ):
+        self.image_name = image_name
+        self.container_name = container_name
+        self.client = docker.from_env()
+        self.container = None
+
+    def build_image(self) -> bool:
+        """Build the Docker image."""
+        print(f"Building Docker image: {self.image_name}")
+        try:
+            self.client.images.build(
+                path=".",
+                dockerfile="Dockerfile.combined",
+                tag=self.image_name,
+                rm=True,
+            )
+            print("✓ Docker image built successfully")
+            return True
+        except docker.errors.BuildError as e:
+            print(f"✗ Failed to build Docker image: {e}")
+            return False
+
+    def start_container(
+        self, port: int = 8000, gpu_idx: int = 0, cpu_mode: bool = False
+    ) -> bool:
+        """Start the Docker container."""
+        print(f"Starting container: {self.container_name}")
+        try:
+            # Stop and remove existing container if it exists
+            try:
+                existing = self.client.containers.get(self.container_name)
+                existing.stop()
+                existing.remove()
+            except docker.errors.NotFound:
+                pass
+
+            # Start new container with GPU access
+            kwargs = {
+                "name": self.container_name,
+                "ports": {"8000/tcp": port},
+                "detach": True,
+            }
+            if cpu_mode:
+                kwargs["environment"] = {
+                    "TORCH_NUM_THREADS": psutil.cpu_count(logical=False),
+                    "OPENBLAS_NUM_THREADS": 4,
+                    "OMP_NUM_THREADS": 4,
+                    "RECOGNITION_BATCH_SIZE": 16,
+                    "DETECTION_BATCH_SIZE": 4,
+                    "TABLE_REC_BATCH_SIZE": 6,
+                    "LAYOUT_BATCH_SIZE": 6,
+                    "OCR_ERROR_BATCH_SIZE": 6,
+                    "DETECTOR_POSTPROCESSING_CPU_WORKERS": 4,
+                    "CHUNK_SIZE": 6,
+                }
+            else:
+                kwargs["device_requests"] = [
+                    docker.types.DeviceRequest(
+                        device_ids=[str(gpu_idx)], capabilities=[["gpu"]]
+                    )
+                ]
+
+            self.container = self.client.containers.run(self.image_name, **kwargs)
+
+            print(f"✓ Container started with ID: {self.container.id}")
+
+            # Wait for container to be ready
+            return self._wait_for_health_check(port)
+
+        except Exception as e:
+            print(f"✗ Failed to start container: {e}")
+            return False
+
+    def _wait_for_health_check(self, port: int, timeout: int = 60) -> bool:
+        """Wait for the container to be ready by checking health endpoint."""
+        print("Waiting for container to be ready...")
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            try:
+                import requests
+
+                response = requests.get(
+                    f"http://localhost:{port}/health_check", timeout=5
+                )
+                if response.status_code == 200:
+                    print("✓ Container is ready")
+                    return True
+            except requests.exceptions.RequestException:
+                pass
+
+            time.sleep(2)
+
+        print("✗ Container failed to become ready within timeout")
+        return False
+
+    def stop_container(self):
+        """Stop and remove the Docker container."""
+        if self.container:
+            print(f"Stopping container: {self.container_name}")
+            try:
+                self.container.stop()
+                self.container.remove()
+                print("✓ Container stopped and removed")
+            except Exception as e:
+                print(f"Warning: Error stopping container: {e}")
 
 
 class ResourceMonitor:
@@ -319,6 +436,27 @@ class PerformanceTester:
             pdf_files = pdf_files[: self.max_files]
         return sorted(pdf_files)
 
+    async def _download_images(self, session: aiohttp.ClientSession, image_urls: List[str], pdf_name: str):
+        """Download images and save them to the output directory."""
+        pdf_base_name = os.path.splitext(pdf_name)[0]
+        
+        for i, img_url in enumerate(image_urls):
+            try:
+                async with session.get(img_url) as response:
+                    if response.status == 200:
+                        # Get file extension from URL or default to .png
+                        img_ext = os.path.splitext(img_url)[1] or '.png'
+                        img_filename = f"{pdf_base_name}_image_{i+1:03d}{img_ext}"
+                        img_path = os.path.join(self.out_dir, img_filename)
+                        
+                        async with aiofiles.open(img_path, 'wb') as f:
+                            await f.write(await response.read())
+                        print(f"    Saved: {img_filename}")
+                    else:
+                        print(f"    Failed to download image {i+1}: HTTP {response.status}")
+            except Exception as e:
+                print(f"    Error downloading image {i+1}: {e}")
+
     async def process_single_pdf(
         self, processor: AsyncPDFProcessor, pdf_path: Path
     ) -> Dict:
@@ -349,6 +487,7 @@ class PerformanceTester:
             )
             output_md = result.get("result", result.get("error"))
             worker_info = result.get("worker_info", {})
+            images = result.get("images", [])
 
             test_result = {
                 "filename": pdf_path.name,
@@ -382,6 +521,15 @@ class PerformanceTester:
                     out_path = os.path.join(self.out_dir, f"{pdf_path.name}.md")
                     with open(out_path, "w+") as f:
                         f.write(output_md)
+
+                if images:
+                    print(f"  Images for {pdf_path.name}:")
+                    for i, img_url in enumerate(images):
+                        print(f"    {i+1}: {img_url}")
+                        
+                    # Download and save images if out_dir is specified
+                    if self.out_dir:
+                        await self._download_images(processor.session, images, pdf_path.name)
 
             if success:
                 print(

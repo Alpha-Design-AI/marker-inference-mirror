@@ -1,0 +1,6 @@
+commands = [
+  "source .venv/bin/activate && pip install:*",
+  ".venv/bin/pip install:*",
+  ".venv/bin/python -c:*",
+  ".venv/bin/python integration_test.py --help"
+]
