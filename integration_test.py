@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import List, Dict, Tuple
 import pypdfium2
+from pypdf import PdfReader, PdfWriter
 import threading
 import click
 import psutil
@@ -331,7 +332,6 @@ class AsyncPDFProcessor:
 
         async with aiofiles.open(pdf_path, "rb") as f:
             file_content = await f.read()
-
             data = aiohttp.FormData()
             data.add_field(
                 "file",
@@ -417,6 +417,7 @@ class PerformanceTester:
         force_ocr: bool = False,
         out_dir: str = "",
         copies: int = 1,
+        slice_pages: int = 0,
     ):
         self.pdf_dir = Path(pdf_dir)
         self.base_url = base_url
@@ -427,13 +428,57 @@ class PerformanceTester:
         self.config = {"force_ocr": force_ocr, "paginate_output": True}
         self.out_dir = out_dir
         self.copies = copies
+        self.slice_pages = slice_pages
+
+    def slice_pdf(self, pdf_path: Path, pages_per_slice: int) -> List[Path]:
+        """Slice a PDF into smaller chunks and return paths to the sliced files."""
+        try:
+            reader = PdfReader(str(pdf_path))
+            total_pages = len(reader.pages)
+            
+            if total_pages <= pages_per_slice:
+                return [pdf_path]  # No need to slice
+            
+            sliced_files = []
+            temp_dir = pdf_path.parent / "temp_slices"
+            temp_dir.mkdir(exist_ok=True)
+            
+            for start_page in range(0, total_pages, pages_per_slice):
+                end_page = min(start_page + pages_per_slice, total_pages)
+                
+                writer = PdfWriter()
+                for page_num in range(start_page, end_page):
+                    writer.add_page(reader.pages[page_num])
+                
+                slice_filename = f"{pdf_path.stem}_slice_{start_page+1}-{end_page}.pdf"
+                slice_path = temp_dir / slice_filename
+                
+                with open(slice_path, 'wb') as output_file:
+                    writer.write(output_file)
+                
+                sliced_files.append(slice_path)
+            
+            return sliced_files
+            
+        except Exception as e:
+            print(f"Warning: Could not slice {pdf_path}: {e}")
+            return [pdf_path]  # Return original file if slicing fails
 
     def find_pdf_files(self) -> List[Path]:
         """Find all PDF files in the directory."""
         pdf_files = list(self.pdf_dir.glob("*.pdf"))
         if self.max_files is not None:
             pdf_files = pdf_files[: self.max_files]
-        return sorted(pdf_files * self.copies)
+        
+        all_files = []
+        for pdf_file in sorted(pdf_files):
+            if self.slice_pages > 0:
+                sliced_files = self.slice_pdf(pdf_file, self.slice_pages)
+                all_files.extend(sliced_files * self.copies)
+            else:
+                all_files.extend([pdf_file] * self.copies)
+        
+        return all_files
 
     async def _download_images(self, session: aiohttp.ClientSession, image_urls: List[str], pdf_name: str):
         """Download images and save them to the output directory."""
@@ -760,6 +805,12 @@ class PerformanceTester:
     default=1,
     help="Number of copies of each document to run",
 )
+@click.option(
+    "--slice",
+    type=int,
+    default=0,
+    help="Slice PDFs into chunks of N pages (0 = no slicing)",
+)
 def main(
     pdf_dir: str,
     port: int,
@@ -772,6 +823,7 @@ def main(
     image_name: str,
     cpu_mode: bool = False,
     copies: int = 1,
+    slice: int = 0,
 ):
     # Verify PDF directory exists
     if not os.path.isdir(pdf_dir):
@@ -814,6 +866,7 @@ def main(
             force_ocr,
             out_dir,
             copies,
+            slice,
         )
         start_time = time.time()
         tester.run_tests()
